@@ -2011,6 +2011,7 @@ function getDeviceInfo(msg) {
 async function cloudLogin(username, password, region, appType, appDeviceId, appSessionId, appRegion, appEndpoint, loginCallback) {
     if (!AppCloud) {
         AppCloud = require('./lib/appcloud');
+        adapter.log.info(`Got retry fix (#760): ${require('./lib/got-retry-fix').gotRetryFixStatus()}`);
     }
 
     let cloudInstance;
