@@ -50,6 +50,10 @@ const cloudDeviceGroups = {};
 let cloudPollingTimeout = null;
 const cloudGroupPollingTimeouts = {};
 let cloudPollingErrorCounter = 0;
+let cloudSyncRetryTimeout = null;
+let cloudSyncRetryCount = 0;
+const CLOUD_SYNC_RETRY_INTERVAL = 5 * 60 * 1000;
+const CLOUD_SYNC_MAX_RETRIES = 12;
 let cloudMqtt = null;
 let lastMqttMessage = Date.now();
 let isStopping = false;
@@ -90,6 +94,7 @@ function startAdapter(options) {
                 }
             }
             cloudPollingTimeout && clearTimeout(cloudPollingTimeout);
+            cloudSyncRetryTimeout && clearTimeout(cloudSyncRetryTimeout);
             for (const id in cloudGroupPollingTimeouts) {
                 cloudGroupPollingTimeouts[id] && clearTimeout(cloudGroupPollingTimeouts[id]);
             }
@@ -162,7 +167,13 @@ async function initScenes() {
         if (!appCloudApi) {
             return;
         }
-        const scenes = await appCloudApi.getScenes(group.groupId);
+        let scenes;
+        try {
+            scenes = await appCloudApi.getScenes(group.groupId);
+        } catch (err) {
+            adapter.log.warn(`Error fetching scenes for group ${group.groupId}: ${err.message}`);
+            continue;
+        }
         if (scenes && scenes.length) {
             scenes.forEach(scene => {
                 scene.groupId = group.groupId;
@@ -228,7 +239,13 @@ async function initDeviceGroups() {
     }
     for (const group of appCloudApi.groups) {
         if (!appCloudApi) return;
-        const deviceGroupData = await appCloudApi.getGroupDeviceGroups(group.groupId);
+        let deviceGroupData;
+        try {
+            deviceGroupData = await appCloudApi.getGroupDeviceGroups(group.groupId);
+        } catch (err) {
+            adapter.log.warn(`Error fetching device groups for group ${group.groupId}: ${err.message}`);
+            continue;
+        }
         if (!deviceGroupData || !deviceGroupData.length) {
             continue;
         }
@@ -238,7 +255,13 @@ async function initDeviceGroups() {
         }
 
         if (!appCloudApi) return;
-        const deviceGroupRelationData = await appCloudApi.getGroupDeviceGroupRelations(group.groupId);
+        let deviceGroupRelationData;
+        try {
+            deviceGroupRelationData = await appCloudApi.getGroupDeviceGroupRelations(group.groupId);
+        } catch (err) {
+            adapter.log.warn(`Error fetching device group relations for group ${group.groupId}: ${err.message}`);
+            continue;
+        }
         if (!deviceGroupRelationData || !deviceGroupRelationData['5'] || !Array.isArray(deviceGroupRelationData['5'])) {
             continue;
         }
@@ -320,7 +343,12 @@ async function initDeviceGroups() {
 
                     const dps = {};
                     dps[id] = value;
-                    await appCloudApi.setDeviceGroupDps(deviceGroup.gid, deviceGroup.id, dps);
+                    try {
+                        await appCloudApi.setDeviceGroupDps(deviceGroup.gid, deviceGroup.id, dps);
+                    } catch (err) {
+                        adapter.log.warn(`Cannot set device group ${deviceGroup.id} via cloud: ${err.message}`);
+                        return;
+                    }
                     pollDeviceGroup(deviceGroup.id, 5000);
                     if (deviceGroup.children && deviceGroup.children.length) {
                         for (const childId of deviceGroup.children) {
@@ -836,7 +864,13 @@ function pollDeviceGroup(deviceGroupId, overwriteDelay) {
             return;
         }
 
-        const groupData = await appCloudApi.getDeviceGroupData(deviceGroups[deviceGroupId].gid, deviceGroupId);
+        let groupData;
+        try {
+            groupData = await appCloudApi.getDeviceGroupData(deviceGroups[deviceGroupId].gid, deviceGroupId);
+        } catch (err) {
+            adapter.log.warn(`Error fetching data for device group ${deviceGroupId}: ${err.message}`);
+            return;
+        }
         if (!groupData || !Array.isArray(groupData)) {
             adapter.log.warn(`Cannot get data for device group ${deviceGroupId}`);
             return;
@@ -1436,8 +1470,13 @@ async function checkDiscoveredEncryptedDevices(deviceId, callback) {
     callback && callback();
 }
 
+/**
+ * Logs in to the App cloud and receives the device list.
+ * @returns {Promise<boolean>} true when synced (or a restart is planned after a new login), false when the sync failed
+ */
 async function syncDevicesWithAppCloud() {
     let adapterRestartPlanned = false;
+    let deviceSyncFailed = false;
     adapter.log.info("Try to sync devices from Cloud using stored cloud credentials");
     appCloudApi = await cloudLogin(adapter.config.cloudUsername, adapter.config.cloudPassword, adapter.config.region, adapter.config.appType, adapter.config.appDeviceId, adapter.config.appSessionId, adapter.config.appRegion, adapter.config.appEndpoint, (cloudApi, lastLoginResult) => {
         adapter.log.info("Cloud login successful. Adapter restarts in 5s");
@@ -1457,16 +1496,17 @@ async function syncDevicesWithAppCloud() {
     });
     if (appCloudApi) {
         if (adapterRestartPlanned) {
-            return;
+            return true;
         }
 
         try {
             await receiveCloudDevices(appCloudApi);
         } catch (err) {
             adapter.log.error(`Error to receive cloud devices: ${err.message}`);
+            deviceSyncFailed = true;
         }
         if (adapterRestartPlanned) {
-            return;
+            return true;
         }
         adapter.log.debug('Initial cloud device sync done');
 
@@ -1495,9 +1535,53 @@ async function syncDevicesWithAppCloud() {
             }, adapter.config.cloudPollingInterval * 1000);
         }
 
+        return !deviceSyncFailed;
     } else {
         adapter.log.warn("App cloud connection failed. No sync possible");
+        return false;
     }
+}
+
+/**
+ * Cloud sync at start-up. Local devices are already running; a failed cloud sync (e.g. internet down after a
+ * router restart) is retried later instead of ending the adapter.
+ */
+async function startCloudSync() {
+    let synced = false;
+    try {
+        synced = await syncDevicesWithAppCloud();
+    } catch (err) {
+        adapter.log.error(`Cloud sync failed: ${err.message}`);
+    }
+    if (!synced) {
+        scheduleCloudSyncRetry();
+        return;
+    }
+    cloudSyncRetryCount = 0;
+    try {
+        await initScenes();
+    } catch (err) {
+        adapter.log.warn(`Error initializing cloud scenes: ${err.message}`);
+    }
+    try {
+        await initDeviceGroups();
+    } catch (err) {
+        adapter.log.warn(`Error initializing cloud device groups: ${err.message}`);
+    }
+}
+
+function scheduleCloudSyncRetry() {
+    if (isStopping || cloudSyncRetryTimeout) return;
+    if (cloudSyncRetryCount >= CLOUD_SYNC_MAX_RETRIES) {
+        adapter.log.warn(`Cloud sync still failing after ${CLOUD_SYNC_MAX_RETRIES} retries. Restart the adapter to try again. Local devices keep working.`);
+        return;
+    }
+    cloudSyncRetryCount++;
+    adapter.log.info(`Cloud sync failed. Retry ${cloudSyncRetryCount}/${CLOUD_SYNC_MAX_RETRIES} in ${CLOUD_SYNC_RETRY_INTERVAL / 60000} minutes. Local devices keep working.`);
+    cloudSyncRetryTimeout = setTimeout(async () => {
+        cloudSyncRetryTimeout = null;
+        await startCloudSync();
+    }, CLOUD_SYNC_RETRY_INTERVAL);
 }
 
 async function initDone() {
@@ -1507,9 +1591,7 @@ async function initDone() {
     discoveredEncryptedDevices = {}; // Clean discovered devices to reset auto-detection
     adapterInitDone = true;
     if (adapter.config.cloudUsername && adapter.config.cloudPassword) {
-        await syncDevicesWithAppCloud();
-        await initScenes();
-        await initDeviceGroups();
+        await startCloudSync();
     }
 
     // Cleanup loaded schemas because need a lot of ram, and simply do every 10 minutes if new devices were handled silently
@@ -1969,12 +2051,18 @@ async function cloudLogin(username, password, region, appType, appDeviceId, appS
 
 async function receiveCloudDevices(cloudApiInstance, onlyNew) {
     const groups = await cloudApiInstance.getLocationList();
+    if (!Array.isArray(groups)) {
+        throw new Error('Cloud returned no location list');
+    }
     cloudApiInstance.groups = groups;
     let deviceList = [];
     let deviceListInfo = [];
     for (const group of groups) {
         try {
             const resultDevices = await cloudApiInstance.getGroupDevices(group.groupId);
+            if (!Array.isArray(resultDevices)) {
+                throw new Error('Cloud returned no device list');
+            }
             resultDevices.forEach(device => {
                 if (device.dataPointInfo) {
                     if (device.dataPointInfo.dps) {
@@ -1999,6 +2087,9 @@ async function receiveCloudDevices(cloudApiInstance, onlyNew) {
         }
         try {
             const resultInfo = await cloudApiInstance.getGroupSchemas(group.groupId);
+            if (!Array.isArray(resultInfo)) {
+                throw new Error('Cloud returned no device info list');
+            }
             deviceListInfo = [...deviceListInfo, ...resultInfo];
         } catch (err) {
             adapter.log.error(`Error fetching device info for group ${group.groupId}: ${err}`);
@@ -2077,6 +2168,9 @@ async function updateValuesFromCloud(groupId, retry = false) {
     for (const groupId of groups) {
         try {
             const resultDevices = await appCloudApi.getGroupDevices(groupId);
+            if (!Array.isArray(resultDevices)) {
+                throw new Error('Cloud returned no device list');
+            }
             resultDevices.forEach(device => {
                 if (device.dataPointInfo) {
                     if (device.dataPointInfo.dps) {

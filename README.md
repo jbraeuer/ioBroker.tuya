@@ -179,6 +179,7 @@ Send the log with reference to the generated GitHub issue to iobroker@fischer-ka
 ## Changelog
 ### __WORK IN PROGRESS__
 * Fix adapter crash (UNCAUGHT_EXCEPTION, restart loop) after network outages on Node.js >= 24.20: the App cloud login (got 11 in @tuyapi/cloud) no longer uses got's own retry, which threw "The `onCancel` handler was attached after the promise settled." from a timer (#760, sindresorhus/got#2469)
+* App cloud: if the cloud is unreachable at start-up, the cloud sync is retried every 5 minutes (up to 12 times) instead of being given up; local devices keep working. Cloud errors are reported with their real cause and no longer end the adapter
 
 ### 3.18.2 (2026-08-25)
 * (@Apollon77) Removes the http-mitm-proxy patching because no longer needed
