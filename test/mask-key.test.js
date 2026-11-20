@@ -24,3 +24,30 @@ describe('maskKey', () => {
         expect(maskKey(Buffer.from('ab3456789012cdef'))).to.equal(`ab${'*'.repeat(14)}`);
     });
 });
+
+describe('stringifyMasked', () => {
+    const { stringifyMasked } = require('../lib/mask-key');
+    const secret = 'ab3456789012cdef';
+
+    it('masks localKey in nested objects and arrays (cloud device list)', () => {
+        const out = stringifyMasked([{ devId: 'd1', name: 'Dehumidifier', localKey: secret, productKey: 'pk1' }]);
+        expect(out).to.not.include(secret);
+        expect(JSON.parse(out)).to.deep.equal([{ devId: 'd1', name: 'Dehumidifier', localKey: `ab${'*'.repeat(14)}`, productKey: 'pk1' }]);
+    });
+    it('masks every key field name tuyapi and the cloud use', () => {
+        const obj = { data: { localKey: secret }, local_key: secret, device: { key: secret, productKey: 'pk1' }, sessionKey: secret, _tmpLocalKey: secret, _tmpRemoteKey: secret };
+        const out = stringifyMasked(obj);
+        expect(out).to.not.include(secret);
+        expect(out).to.include('"productKey":"pk1"');
+    });
+    it('masks binary keys (Buffer) completely', () => {
+        const out = stringifyMasked({ sessionKey: Buffer.from(secret), key: Buffer.from(secret) });
+        expect(JSON.parse(out)).to.deep.equal({ sessionKey: '(masked)', key: '(masked)' });
+    });
+    it('keeps empty keys visible as (none) and leaves other values alone', () => {
+        expect(JSON.parse(stringifyMasked({ localKey: '', ip: '1.2.3.4', dps: { 1: true } }))).to.deep.equal({ localKey: '(none)', ip: '1.2.3.4', dps: { 1: true } });
+    });
+    it('behaves like JSON.stringify for undefined', () => {
+        expect(stringifyMasked(undefined)).to.equal(undefined);
+    });
+});
