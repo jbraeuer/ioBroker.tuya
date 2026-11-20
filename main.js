@@ -22,6 +22,7 @@ const finalhandler = require('finalhandler');
 let mitm;
 
 const enhancedDpLogic = require('./lib/enhanced_logic.js');
+const { maskKey } = require('./lib/mask-key');
 const crypto = require('crypto');
 const UDP_KEY_STRING = 'yGAdlopoPVldABfn';
 const UDP_KEY = crypto.createHash('md5').update(UDP_KEY_STRING, 'utf8').digest();
@@ -942,7 +943,7 @@ function connectDevice(deviceId, callback) {
             callback && callback();
             return;
         }
-        adapter.log.info(`${deviceId} Init with IP=${knownDevices[deviceId].ip}, Key=${knownDevices[deviceId].localKey}, Version=${knownDevices[deviceId].version}`);
+        adapter.log.info(`${deviceId} Init with IP=${knownDevices[deviceId].ip}, Key=${maskKey(knownDevices[deviceId].localKey)}, Version=${knownDevices[deviceId].version}`);
         knownDevices[deviceId].stop = false;
         knownDevices[deviceId].device = new TuyaDevice({
             id: deviceId,
@@ -1429,7 +1430,7 @@ function discoverLocalDevices() {
 
 async function checkDiscoveredEncryptedDevices(deviceId, callback) {
     const foundIps = Object.keys(discoveredEncryptedDevices);
-    adapter.log.debug(`${deviceId}: Try to initialize encrypted device with received UDP messages (#IPs: ${foundIps.length}): version=${knownDevices[deviceId].version}, key=${knownDevices[deviceId].localKey}`);
+    adapter.log.debug(`${deviceId}: Try to initialize encrypted device with received UDP messages (#IPs: ${foundIps.length}): version=${knownDevices[deviceId].version}, key=${maskKey(knownDevices[deviceId].localKey)}`);
     const parser = new MessageParser({version: knownDevices[deviceId].version || 3.3, key: knownDevices[deviceId].localKey});
     const parserDefault = new MessageParser({version: knownDevices[deviceId].version || 3.3, key: UDP_KEY});
 
