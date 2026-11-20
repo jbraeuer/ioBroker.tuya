@@ -22,7 +22,7 @@ const finalhandler = require('finalhandler');
 let mitm;
 
 const enhancedDpLogic = require('./lib/enhanced_logic.js');
-const { maskKey } = require('./lib/mask-key');
+const { maskKey, stringifyMasked } = require('./lib/mask-key');
 const crypto = require('crypto');
 const UDP_KEY_STRING = 'yGAdlopoPVldABfn';
 const UDP_KEY = crypto.createHash('md5').update(UDP_KEY_STRING, 'utf8').digest();
@@ -876,7 +876,7 @@ function pollDeviceGroup(deviceGroupId, overwriteDelay) {
             adapter.log.warn(`Cannot get data for device group ${deviceGroupId}`);
             return;
         }
-        adapter.log.debug(`Got data for device group ${deviceGroupId}: ${JSON.stringify(groupData)}`);
+        adapter.log.debug(`Got data for device group ${deviceGroupId}: ${stringifyMasked(groupData)}`);
         for (const dpData of groupData) {
             const id = dpData.dpId;
             let value = dpData.value;
@@ -1187,7 +1187,7 @@ async function initDevice(deviceId, productKey, data, preserveFields, fromDiscov
         'data': data
     });
     knownDevices[deviceId].errorcount = 0;
-    adapter.log.debug(`${deviceId}: Init device with data (after merge): ${JSON.stringify(knownDevices[deviceId])}`);
+    adapter.log.debug(`${deviceId}: Init device with data (after merge): ${stringifyMasked(knownDevices[deviceId])}`);
 
     if (!fromDiscovery) {
         const stateIp = await adapter.getStateAsync(`${deviceId}.ip`);
@@ -1862,7 +1862,7 @@ async function catchProxyInfo(data) {
     let devices = [];
     let deviceInfos = [];
 
-    adapter.log.debug(`Process found devices: ${JSON.stringify(data.result)}`);
+    adapter.log.debug(`Process found devices: ${stringifyMasked(data.result)}`);
     data.result.forEach((obj) => {
         if (obj.a === 'tuya.m.my.group.device.list') {
             devices = obj.result;
@@ -2193,7 +2193,7 @@ async function updateValuesFromCloud(groupId, retry = false) {
             errorsThisRun++;
         }
     }
-    adapter.log.debug(`Received ${deviceList.length} devices from cloud: ${JSON.stringify(deviceList)}`);
+    adapter.log.debug(`Received ${deviceList.length} devices from cloud: ${stringifyMasked(deviceList)}`);
     for (const device of deviceList) {
         const deviceId = device.devId;
         if (knownDevices[deviceId] && !knownDevices[deviceId].connected && knownDevices[deviceId].dpIdList && knownDevices[deviceId].dpIdList.length) {
